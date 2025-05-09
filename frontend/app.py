@@ -1,36 +1,69 @@
 import streamlit as st
 import requests
 import json
+import time
 from typing import List, Optional, Dict, Any, Tuple
 
 API_BASE_URL = "http://localhost:8000"
 
+REQUEST_TIMEOUT = 3
+
+MAX_RETRIES = 3
+
+RETRY_INTERVAL = 1
+
 GameState = Dict[str, Any]
 
-def start_new_game() -> GameState:
+def make_api_request(method: str, endpoint: str, data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """
+    APIリクエストを実行する（リトライロジック付き）
+
+    Args:
+        method (str): HTTPメソッド（'get'または'post'）
+        endpoint (str): APIエンドポイント
+        data (Optional[Dict[str, Any]], optional): POSTリクエスト用のデータ
+
+    Returns:
+        Optional[Dict[str, Any]]: APIレスポンス。エラーの場合はNone
+    """
+    url = f"{API_BASE_URL}{endpoint}"
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            if method.lower() == 'get':
+                response = requests.get(url, timeout=REQUEST_TIMEOUT)
+            else:
+                response = requests.post(url, json=data, timeout=REQUEST_TIMEOUT)
+            
+            response.raise_for_status()
+            return response.json()
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+            if attempt < MAX_RETRIES - 1:
+                st.warning(f"APIリクエストに失敗しました。リトライします... ({attempt + 1}/{MAX_RETRIES})")
+                time.sleep(RETRY_INTERVAL)
+            else:
+                st.error(f"APIリクエストに失敗しました: {str(e)}")
+                return None
+
+def start_new_game() -> Optional[GameState]:
     """
     新しいゲームを開始する
 
     Returns:
-        GameState: 新しいゲームの初期状態
+        Optional[GameState]: 新しいゲームの初期状態。エラーの場合はNone
     """
-    response = requests.post(f"{API_BASE_URL}/start")
-    return response.json()
+    return make_api_request('post', '/start')
 
 def get_game_state() -> Optional[GameState]:
     """
     現在のゲーム状態を取得する
 
     Returns:
-        Optional[GameState]: 現在のゲーム状態。ゲームが開始されていない場合はNone
+        Optional[GameState]: 現在のゲーム状態。ゲームが開始されていない場合またはエラーの場合はNone
     """
-    try:
-        response = requests.get(f"{API_BASE_URL}/")
-        return response.json()
-    except:
-        return None
+    return make_api_request('get', '/')
 
-def make_move(row: int, col: int) -> GameState:
+def make_move(row: int, col: int) -> Optional[GameState]:
     """
     プレイヤーの手を処理する
 
@@ -39,23 +72,18 @@ def make_move(row: int, col: int) -> GameState:
         col (int): 列のインデックス
 
     Returns:
-        GameState: 手を適用した後のゲーム状態
+        Optional[GameState]: 手を適用した後のゲーム状態。エラーの場合はNone
     """
-    response = requests.post(
-        f"{API_BASE_URL}/move",
-        json={"row": row, "col": col}
-    )
-    return response.json()
+    return make_api_request('post', '/move', {"row": row, "col": col})
 
-def reset_game() -> GameState:
+def reset_game() -> Optional[GameState]:
     """
     ゲームをリセットする
 
     Returns:
-        GameState: リセットされたゲームの状態
+        Optional[GameState]: リセットされたゲームの状態。エラーの場合はNone
     """
-    response = requests.get(f"{API_BASE_URL}/reset")
-    return response.json()
+    return make_api_request('get', '/reset')
 
 def display_board(board: List[List[Optional[str]]]) -> None:
     """
@@ -85,13 +113,40 @@ def main() -> None:
     """
     st.title("マルバツゲーム（三目並べ）")
     
+    default_game_state = {
+        "board": [[None, None, None], [None, None, None], [None, None, None]],
+        "current_player": "X",
+        "status": "in_progress"
+    }
+    
+    connection_status = st.empty()
+    
     if "game_state" not in st.session_state:
         game_state = get_game_state()
+        
         if game_state is None:
             game_state = start_new_game()
-        st.session_state.game_state = game_state
+            
+            if game_state is None:
+                connection_status.error("バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。")
+                st.session_state.game_state = default_game_state
+                st.session_state.connection_error = True
+            else:
+                st.session_state.game_state = game_state
+                st.session_state.connection_error = False
+        else:
+            st.session_state.game_state = game_state
+            st.session_state.connection_error = False
     
+    # 現在のゲーム状態を取得
     game_state = st.session_state.game_state
+    connection_error = st.session_state.get("connection_error", False)
+    
+    if connection_error:
+        connection_status.error("バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。")
+        st.warning("現在、オフラインモードで実行中です。バックエンドサーバーが起動したら、ページを更新してください。")
+    else:
+        connection_status.success("バックエンドサーバーに接続しています。")
     
     st.write(f"現在のプレイヤー: {game_state['current_player']}")
     st.write(f"ゲームの状態: {game_state['status']}")
@@ -106,8 +161,18 @@ def main() -> None:
         st.info("引き分けです！")
     
     if st.button("ゲームをリセット"):
-        st.session_state.game_state = reset_game()
-        st.rerun()
+        if connection_error:
+            st.session_state.game_state = default_game_state
+            st.rerun()
+        else:
+            new_game_state = reset_game()
+            if new_game_state is None:
+                st.error("ゲームのリセットに失敗しました。")
+                st.session_state.connection_error = True
+            else:
+                st.session_state.game_state = new_game_state
+                st.session_state.connection_error = False
+            st.rerun()
 
 if __name__ == "__main__":
     main()
