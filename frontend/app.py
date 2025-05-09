@@ -142,6 +142,12 @@ def main() -> None:
     game_state = st.session_state.game_state
     connection_error = st.session_state.get("connection_error", False)
     
+    if game_state is None:
+        game_state = default_game_state
+        st.session_state.game_state = default_game_state
+        connection_error = True
+        st.session_state.connection_error = True
+    
     if connection_error:
         connection_status.error("バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。")
         st.warning("現在、オフラインモードで実行中です。バックエンドサーバーが起動したら、ページを更新してください。")
